@@ -95,8 +95,6 @@ def boxplot_2ind(data1, data2, title, labels):
     plt.show()
     
 def boxplot_ind(data, title, labels):
-
-    
     meanprops = dict(linestyle='-', linewidth=1, color='black')
     medianprops = dict(linestyle='', linewidth=0)
 
@@ -107,7 +105,8 @@ def boxplot_ind(data, title, labels):
     fig.tight_layout()
     fig.subplots_adjust(top=0.85)
 
-    plt.show()
+    plt.show()   
+    
 
 def plot_vr_rates_1st_order(res,var_ind = 0):
     print(res.shape)

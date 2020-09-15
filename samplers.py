@@ -5,6 +5,13 @@ from multiprocessing import Pool
 import multiprocessing
 from potentials import potentialRegression
 
+def MC_sampler(intseed,Potential,N_test,d):
+    """
+    Potential to sample iid observations for pure Monte-Carlo
+    """
+    traj,traj_grad = Potential.sample(intseed,N_test)
+    return traj,traj_grad
+
 def ULA(r_seed,Potential,step, N, n, d, burn_type = "SGLD",main_type = "SGLDFP"):
     """ MCMC ULA
     Args:

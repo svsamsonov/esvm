@@ -1,34 +1,34 @@
 import numpy as np
-from baselines import set_f,PWP_fast,Spectral_var,compute_poisson,compute_L_poisson,qform_q
+from baselines import set_f,PWP_fast,Spectral_var,compute_poisson,compute_L_poisson,qform_q,cur_func
 
 #first-order control variates: ZAV, ZV, LS
-def qform_1_ESVM(a,f_vals,X_grad,W,ind,n):
+def qform_1_ESVM(a,f_vals,X_grad,W,ind,n,alpha):
     """
     ESVM quadratic form computation: asymptotic variance estimator based on kernel W; 
     """
     x_cur = f_vals[:,ind] + X_grad @ a
-    return Spectral_var(x_cur,W)
+    return Spectral_var(x_cur,W) + alpha*np.linalg.norm(a)**2
 
-def grad_qform_1_ESVM(a,f_vals,X_grad,W,ind,n):
+def grad_qform_1_ESVM(a,f_vals,X_grad,W,ind,n,alpha):
     """
     gradient of ESVM quadratic form
     """
     Y = f_vals[:,ind] + X_grad @ a
-    return 2./n * (X_grad*PWP_fast(Y,W).reshape((n,1))).sum(axis=0)
+    return 2./n * (X_grad*PWP_fast(Y,W).reshape((n,1))).sum(axis=0) + 2*alpha*a
 
-def qform_1_ZV(a,f_vals,X_grad,ind,n):
+def qform_1_ZV(a,f_vals,X_grad,ind,n,alpha):
     """
     Least squares evaluated for ZV-1
     """
     x_cur = f_vals[:,ind] + X_grad @ a
-    return 1./(n-1)*np.dot(x_cur - np.mean(x_cur),x_cur - np.mean(x_cur))
+    return 1./(n-1)*np.dot(x_cur - np.mean(x_cur),x_cur - np.mean(x_cur)) + alpha*np.linalg.norm(a)**2
 
-def grad_qform_1_ZV(a,f_vals,X_grad,ind,n):
+def grad_qform_1_ZV(a,f_vals,X_grad,ind,n,alpha):
     """
     Gradient for quadratic form in ZV-1 method 
     """
     Y = f_vals[:,ind] + X_grad @ a
-    return 2./(n-1) * (X_grad*(Y - np.mean(Y)).reshape((n,1))).sum(axis=0)
+    return 2./(n-1) * (X_grad*(Y - np.mean(Y)).reshape((n,1))).sum(axis=0) + 2*alpha*a
 
 def qform_1_LS(a,f_vals,X_grad,ind,n):
     """
@@ -43,6 +43,22 @@ def grad_qform_1_LS(a,f_vals,X_grad,ind,n):
     """
     Y = f_vals[:,ind] + X_grad @ a
     return 2./n * X_grad.T @ Y
+
+def max_1deg_penalty(a,f_vals,X_grad,ind,n,beta):
+    """
+    Computing the smooth maximum with parameter $\beta$ as an alternative to esvm
+    """
+    Y = f_vals[:,ind] + X_grad @ a
+    Y_max = np.max(np.abs(Y))
+    return Y_max + 1./beta*np.log(np.sum(np.exp(beta*(np.abs(Y)-Y_max))))
+
+def grad_max_1deg_penalty(a,f_vals,X_grad,ind,n,beta):
+    """
+    Gradient of the smooth maximum w.r.t. vector a
+    """
+    Y = f_vals[:,ind] + X_grad @ a
+    Y_max = np.max(np.abs(Y))
+    return X_grad.T @ (np.exp(beta*(np.abs(Y)-Y_max))*np.sign(Y)) / np.sum(np.exp(beta*(np.abs(Y)-Y_max)))    
 
 #################################################################################################################################
 #second-order control variates: ZAV, ZV, LS
@@ -151,6 +167,46 @@ def grad_qform_2_LS(a,f_vals,X,X_grad,ind,n):
     nabla_f_B = np.matmul(X_grad.reshape((n,d,1)),X.reshape((n,1,d)))
     nabla_f_B = nabla_f_B + nabla_f_B.transpose((0,2,1)) + 2*np.eye(d).reshape((1,d,d))                     
     nabla_B = 2./n*np.sum(nabla_f_B*Y.reshape((n,1,1)),axis = 0)
+    #stack gradients together
+    grad = np.zeros((d+1)*d,dtype = np.float64)
+    grad[:d] = nabla_b
+    grad[d:] = nabla_B.ravel()
+    return grad
+
+def max_2deg_penalty(a,f_vals,X,X_grad,ind,n,beta):
+    """
+    Smooth maximum penalization for 2nd order polynomials as control variables;
+    Arguments:
+        a - np.array of shape (d+1,d),
+            a[0,:] - coefficients corresponding to 1st order terms;
+            a[1:,:] - np.array of shape (d,d) - coefficients for 2nd order terms
+        beta - smoothness penalization
+    Returns:
+        function value for index ind, scalar
+    """
+    d = X.shape[1]
+    b = a[:d]
+    B = a[d:].reshape((d,d))
+    Y = f_vals[:,ind] + X_grad @ b + qform_q(B+B.T,X_grad,X) + 2*np.trace(B)
+    Y_max = np.max(np.abs(Y))
+    return Y_max + 1./beta*np.log(np.sum(np.exp(beta*(np.abs(Y)-Y_max))))
+
+def grad_max_2deg_penalty(a,f_vals,X,X_grad,ind,n,beta):
+    """
+    Gradient for the smooth maximum
+    """
+    d = X.shape[1]
+    b = a[:d]
+    B = a[d:].reshape((d,d))
+    Y = f_vals[:,ind] + X_grad @ b + qform_q(B+B.T,X_grad,X) + 2*np.trace(B)
+    Y_max = np.max(np.abs(Y))
+    grad_exp = np.exp(beta*(np.abs(Y)-Y_max)) / np.sum(np.exp(beta*(np.abs(Y)-Y_max)))
+    #gradient w.r.t. b
+    nabla_b = X_grad.T @ (grad_exp*np.sign(Y))
+    #gradient w.r.t B
+    nabla_f_B = np.matmul(X_grad.reshape((n,d,1)),X.reshape((n,1,d)))
+    nabla_f_B = nabla_f_B + nabla_f_B.transpose((0,2,1)) + 2*np.eye(d).reshape((1,d,d))
+    nabla_B = np.sum(nabla_f_B*(grad_exp*np.sign(Y)).reshape((n,1,1)),axis = 0)
     #stack gradients together
     grad = np.zeros((d+1)*d,dtype = np.float64)
     grad[:d] = nabla_b
@@ -269,10 +325,38 @@ def grad_qform_k_sep_LS(a,f_vals,X,X_grad,ind,n,k):
         grad_a[i,:] = (nabla_a_i*nabla_qf).sum(axis=0)
     return grad_a.ravel()
 
+def max_kdeg_penalty(a,f_vals,X,X_grad,ind,n,k,beta):
+    """
+    """
+    d = X.shape[1]
+    a = a.reshape((k,d))
+    Y = set_Y_k_deg(a,f_vals,X,X_grad,ind)
+    #compute maximum for numerical stability
+    Y_max = np.max(np.abs(Y))
+    return Y_max + 1./beta*np.log(np.sum(np.exp(beta*(np.abs(Y)-Y_max))))
+
+def grad_max_kdeg_penalty(a,f_vals,X,X_grad,ind,n,k,beta):
+    """
+    """
+    d = X.shape[1]
+    a = a.reshape((k,d))
+    Y = set_Y_k_deg(a,f_vals,X,X_grad,ind)
+    Y_max = np.max(np.abs(Y))
+    grad_exp = np.exp(beta*(np.abs(Y)-Y_max)) / np.sum(np.exp(beta*(np.abs(Y)-Y_max)))
+    grad_exp = grad_exp*np.sign(Y)
+    #gradient w.r.t. b
+    nabla_b = X_grad.T @ grad_exp
+    grad_a = np.zeros_like(a)
+    grad_a[0,:] = nabla_b
+    for i in range(1,k):
+        nabla_a_i = (i+1)*X_grad*(X**i) + (i+1)*i*X**(i-1) 
+        grad_a[i,:] = nabla_a_i.T @ grad_exp
+    return grad_a.ravel()  
+
 #################################################################################################################################
 #wrappers for quadratic forms and their gradients calculations
 #first-order methods
-def Train_1st_order(a,typ,f_vals,traj_grad_list,W,ind,n):
+def Train_1st_order(a,typ,f_vals,traj_grad_list,W,ind,n,alpha,beta):
     """
     Universal wrapper for ZAV, ZV and LS quadratic forms
     Args:
@@ -284,16 +368,18 @@ def Train_1st_order(a,typ,f_vals,traj_grad_list,W,ind,n):
     val_list = np.zeros(n_traj)
     for i in range(len(val_list)):
         if typ == "ESVM":
-            val_list[i] = qform_1_ESVM(a,f_vals[i],traj_grad_list[i],W,ind,n)
-        elif typ == "ZV":
-            val_list[i] = qform_1_ZV(a,f_vals[i],traj_grad_list[i],ind,n)
+            val_list[i] = qform_1_ESVM(a,f_vals[i],traj_grad_list[i],W,ind,n,alpha)
+        elif typ == "EVM":
+            val_list[i] = qform_1_ZV(a,f_vals[i],traj_grad_list[i],ind,n,alpha)
         elif typ == "LS":
             val_list[i] = qform_1_LS(a,f_vals[i],traj_grad_list[i],ind,n)
+        elif typ == "MAX":
+            val_list[i] = max_1deg_penalty(a,f_vals[i],traj_grad_list[i],ind,n,beta)
         else:
             raise "Not implemented error in Train_1st_order: something goes wrong"
     return np.mean(val_list)
 
-def Train_1st_order_grad(a,typ,f_vals,traj_grad_list,W,ind,n):
+def Train_1st_order_grad(a,typ,f_vals,traj_grad_list,W,ind,n,alpha,beta):
     """
     Universal wrapper for ZAV,ZV and LS quadratic forms gradients calculations
     Args:
@@ -305,16 +391,18 @@ def Train_1st_order_grad(a,typ,f_vals,traj_grad_list,W,ind,n):
     grad_vals = np.zeros_like(a)
     for i in range(n_traj):
         if typ == "ESVM":
-            grad_vals += grad_qform_1_ESVM(a,f_vals[i],traj_grad_list[i],W,ind,n)
-        elif typ == "ZV":
-            grad_vals += grad_qform_1_ZV(a,f_vals[i],traj_grad_list[i],ind,n)
+            grad_vals += grad_qform_1_ESVM(a,f_vals[i],traj_grad_list[i],W,ind,n,alpha)
+        elif typ == "EVM":
+            grad_vals += grad_qform_1_ZV(a,f_vals[i],traj_grad_list[i],ind,n,alpha)
         elif typ == "LS":
             grad_vals += grad_qform_1_LS(a,f_vals[i],traj_grad_list[i],ind,n)
+        elif typ == "MAX":
+            grad_vals += grad_max_1deg_penalty(a,f_vals[i],traj_grad_list[i],ind,n,beta)
     grad_vals /= n_traj
     return grad_vals
 
 #second-order methods
-def Train_2nd_order(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,alpha):
+def Train_2nd_order(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,alpha,beta=1.0):
     """
     average spectral variance estimation for given W matrix, based on len(traj_list) trajectories
     Args:
@@ -327,15 +415,17 @@ def Train_2nd_order(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,alpha):
     for i in range(len(val_list)):
         if typ == "ESVM":
             val_list[i] = qform_2_ESVM(a,f_vals[i],traj_list[i],traj_grad_list[i],W,ind,n,alpha)
-        elif typ == "ZV":
+        elif typ == "EVM":
             val_list[i] = qform_2_ZV(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n)
         elif typ == "LS":
             val_list[i] = qform_2_LS(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n)
+        elif typ == "MAX":
+            val_list[i] = max_2deg_penalty(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,beta)
         else:
             raise "Not implemented error in Train_1st_order: something goes wrong"
     return np.mean(val_list)
 
-def Train_2nd_order_grad(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,alpha):
+def Train_2nd_order_grad(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,alpha,beta=1.0):
     """
     gradient for average SV estimate for given W matrix
     Args:
@@ -348,15 +438,17 @@ def Train_2nd_order_grad(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,alpha):
     for i in range(n_traj):
         if typ == "ESVM":
             grad_vals += grad_qform_2_ESVM(a,f_vals[i],traj_list[i],traj_grad_list[i],W,ind,n,alpha)
-        elif typ == "ZV":
+        elif typ == "EVM":
             grad_vals += grad_qform_2_ZV(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n)
         elif typ == "LS":
             grad_vals += grad_qform_2_LS(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n)
+        elif typ == "MAX":
+            grad_vals += grad_max_2deg_penalty(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,beta)
     grad_vals /= n_traj
     return grad_vals
 
 #k-th order polynomials of separate variables
-def Train_kth_order(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,k):
+def Train_kth_order(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,k,beta):
     """
     average spectral variance estimation for given W matrix, based on len(traj_list) trajectories
     Args:
@@ -369,15 +461,17 @@ def Train_kth_order(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,k):
     for i in range(len(val_list)):
         if typ == "ESVM":
             val_list[i] = qform_k_sep_ESVM(a,f_vals[i],traj_list[i],traj_grad_list[i],W,ind,n,k)
-        elif typ == "ZV":
+        elif typ == "EVM":
             val_list[i] = qform_k_sep_ZV(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,k)
         elif typ == "LS":
             val_list[i] = qform_k_sep_LS(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,k)
+        elif typ == "MAX":
+            val_list[i] = max_kdeg_penalty(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,k,beta)
         else:
             raise "Not implemented error in Train_kth_order: something goes wrong"
     return np.mean(val_list)
 
-def Train_kth_order_grad(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,k):
+def Train_kth_order_grad(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,k,beta):
     """
     average spectral variance estimation for given W matrix, based on len(traj_list) trajectories
     Args:
@@ -390,13 +484,36 @@ def Train_kth_order_grad(a,typ,f_vals,traj_list,traj_grad_list,W,ind,n,k):
     for i in range(n_traj):
         if typ == "ESVM":
             grad_vals += grad_qform_k_sep_ESVM(a,f_vals[i],traj_list[i],traj_grad_list[i],W,ind,n,k)
-        elif typ == "ZV":
+        elif typ == "EVM":
             grad_vals += grad_qform_k_sep_ZV(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,k)
         elif typ == "LS":
             grad_vals += grad_qform_k_sep_LS(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,k)
+        elif typ == "MAX":
+            grad_vals += grad_max_kdeg_penalty(a,f_vals[i],traj_list[i],traj_grad_list[i],ind,n,k,beta)
     grad_vals /= n_traj
     return grad_vals
 
+def Train_Gauss(theta,X,X_grad,W,centers,n):
+    """
+    Train Gaussian-based control variates for 1-dimensional Gaussian Mixture example
+    """
+    #compute control functionals
+    X_matr = np.tile(X, (1, len(theta)))
+    x_cur = cur_func(X[:,0]) + X_grad[:,0]*np.sum(np.exp(-0.5*(X_matr - centers)**2)*(X_matr - centers)*theta, axis = 1) +\
+            np.sum(np.exp(-0.5*(X_matr - centers)**2)*((X_matr - centers)**2 - 1)*theta,axis = 1)
+    #return 1./(n-1)*np.dot(x_cur - np.mean(x_cur),x_cur - np.mean(x_cur))
+    return Spectral_var(x_cur,W)
+
+def Train_Gauss_grad(theta,X,X_grad,W,centers,n):
+    """
+    Compute gradients w.r.t. parameters in the same model
+    """
+    #compute control functionals
+    X_matr = np.tile(X, (1, len(theta)))
+    Y = cur_func(X[:,0]) + X_grad[:,0]*np.sum(np.exp(-0.5*(X_matr - centers)**2)*(X_matr - centers)*theta, axis = 1) +\
+            np.sum(np.exp(-0.5*(X_matr - centers)**2)*((X_matr - centers)**2 - 1)*theta,axis = 1)
+    return 2./n * (np.exp(-0.5*(X_matr-centers)**2)*((X_matr - centers)**2-1 +\
+                                                 (X_matr - centers)*X_grad[:,0].reshape((n,1)))).T @ PWP_fast(Y,W)
 
 #################################################################################################################################
 #staff below is not currently used, but is potentially useful

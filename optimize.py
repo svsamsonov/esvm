@@ -3,15 +3,15 @@ import scipy.stats as spstats
 import scipy.sparse as sparse
 import scipy.optimize as opt
 from scipy import signal
-from baselines import qform_q,set_function,PWP_fast,Spectral_var
-from VR_methods import Train_1st_order,Train_2nd_order,Train_1st_order_grad,Train_2nd_order_grad,Train_kth_order, Train_kth_order_grad,set_Y_k_deg
-from samplers import ULA,MALA,RWM,ULA_SAGA
+from baselines import qform_q,set_function,PWP_fast,Spectral_var,cur_func
+from VR_methods import Train_1st_order,Train_2nd_order,Train_1st_order_grad,Train_2nd_order_grad,Train_kth_order, Train_kth_order_grad,set_Y_k_deg,Train_Gauss,Train_Gauss_grad
+from samplers import ULA,MALA,RWM,ULA_SAGA,MC_sampler
 from multiprocessing import Pool
 import multiprocessing
 
+"""
 def optim_1var(i,crit,inds_arr,traj,traj_grad,W_train_spec,n_restarts,tol,sigma):
-    """function to run optimization for 
-    """
+    function to run optimization for 
     if (i < 2):#first order optimization
         n = traj[0].shape[0]
         d = traj[0].shape[1]
@@ -56,13 +56,14 @@ def optim_1var(i,crit,inds_arr,traj,traj_grad,W_train_spec,n_restarts,tol,sigma)
             print("requested precision not necesserily achieved, try to increase error tolerance")
         print("Jacobian matrix at termination: ")
         print(best_jac)
-        return cv_2_poly       
+        return cv_2_poly
+"""
 
+"""
 def optimize_parallel(crit,inds_arr,traj,traj_grad,W_train_spec,n_restarts,tol,sigma = 1.0):
-    """function to run parallel implementation of ZAV implementation
+    function to run parallel implementation of ZAV implementation
     Returns:
         res - tuple of length 4, with first 2 entries - first-order CV's, second 2 entries - second-order CV's
-    """
     #specify other in case of non-standard optimization
     nbcores = 4
     trav = Pool(nbcores)
@@ -77,18 +78,20 @@ def optimize_parallel(crit,inds_arr,traj,traj_grad,W_train_spec,n_restarts,tol,s
     A_ZAV_2[1,:] = res[3]
     trav.close() 
     return A_ZAV_1,A_ZAV_2
+"""
 
-def optimize_1(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma):
+#def optimize_1(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,beta=1.0):
+def optimize_1(i,ind,f_vals,traj,traj_grad,optim_structure,methods):
     """
     """
-    if (i < f_vals[0].shape[1]):
-        crit = "ESVM"
-    elif (i < 2*f_vals[0].shape[1]):
-        crit = "ZV"
-    elif (i < 3*f_vals[0].shape[1]):
-        crit = "LS"
-    else:
-        raise "Not implemented error in optimize_1"
+    crit_ind = i // f_vals[0].shape[1]
+    crit = methods[crit_ind]
+    W_train_spec = optim_structure["W"]
+    n_restarts = optim_structure["n_restarts"]
+    tol = optim_structure["tol"]
+    sigma = optim_structure["sigma"]
+    alpha = optim_structure["alpha"]
+    beta = optim_structure["beta"]
     n = traj[0].shape[0]
     d = traj[0].shape[1]
     cv_1_poly = np.zeros(d,dtype = float)
@@ -97,7 +100,7 @@ def optimize_1(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma):
     cur_x = np.zeros(d,dtype = float)
     cur_jac = None
     for n_iters in range(n_restarts):
-        vspom = opt.minimize(Train_1st_order,sigma*np.random.randn(d),args = (crit,f_vals,traj_grad,W_train_spec,ind,n),jac = Train_1st_order_grad, tol = tol)
+        vspom = opt.minimize(Train_1st_order,sigma*np.random.randn(d),args = (crit,f_vals,traj_grad,W_train_spec,ind,n,alpha,beta), method = 'CG',jac = Train_1st_order_grad, tol = tol)
         converged = converged or vspom.success
         if (vspom.fun < cur_f):
             cur_f = vspom.fun
@@ -112,17 +115,19 @@ def optimize_1(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma):
     print(cur_jac)
     return cv_1_poly
 
-def optimize_2(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alpha = 0.0):
+#def optimize_2(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alpha = 0.0,beta=1.0):
+def optimize_2(i,ind,f_vals,traj,traj_grad,optim_structure,methods):
     """
+    Function to optimize 2nd order polynomials of separate variables
     """
-    if (i < f_vals[0].shape[1]):#ZAV
-        crit = "ESVM"
-    elif (i < 2*f_vals[0].shape[1]):#
-        crit = "ZV"
-    elif (i < 3*f_vals[0].shape[1]):
-        crit = "LS"
-    else:
-        raise "Not implemented error in optimize_1"
+    crit_ind = i // f_vals[0].shape[1]
+    crit = methods[crit_ind]
+    W_train_spec = optim_structure["W"]
+    n_restarts = optim_structure["n_restarts"]
+    tol = optim_structure["tol"]
+    sigma = optim_structure["sigma"]
+    alpha = optim_structure["alpha"]
+    beta = optim_structure["beta"]
     n = traj[0].shape[0]
     d = traj[0].shape[1]
     cv_2_poly = np.zeros((d+1)*d,dtype = float)
@@ -133,7 +138,7 @@ def optimize_2(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alp
         #create and symmetrize starting point
         init_point = sigma*np.random.randn(d+1,d)
         init_point[1:,:] = (init_point[1:,:]+init_point[1:,:].T)
-        vspom = opt.minimize(Train_2nd_order,init_point,args=(crit,f_vals,traj,traj_grad,W_train_spec,ind,n,alpha), jac = Train_2nd_order_grad, tol = tol)
+        vspom = opt.minimize(Train_2nd_order,init_point,args=(crit,f_vals,traj,traj_grad,W_train_spec,ind,n,alpha,beta), jac = Train_2nd_order_grad, tol = tol)
         converged = converged or vspom.success
         if (vspom.fun < cur_f):
             cur_f = vspom.fun
@@ -147,17 +152,19 @@ def optimize_2(i,ind,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alp
     print(best_jac)
     return cv_2_poly
 
-def optimize_k(i,ind,deg,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alpha = 0.0):
+#def optimize_k(i,ind,deg,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alpha = 0.0):
+def optimize_k(i,ind,deg,f_vals,traj,traj_grad,optim_structure,methods):
     """
+    Function to optimize k-degree polynomials of separate variables
     """
-    if (i < f_vals[0].shape[1]):#ZAV
-        crit = "ESVM"
-    elif (i < 2*f_vals[0].shape[1]):#
-        crit = "ZV"
-    elif (i < 3*f_vals[0].shape[1]):
-        crit = "LS"
-    else:
-        raise "Not implemented error in optimize_1"
+    crit_ind = i // f_vals[0].shape[1]
+    crit = methods[crit_ind]
+    W_train_spec = optim_structure["W"]
+    n_restarts = optim_structure["n_restarts"]
+    tol = optim_structure["tol"]
+    sigma = optim_structure["sigma"]
+    alpha = optim_structure["alpha"]
+    beta = optim_structure["beta"]
     n = traj[0].shape[0]
     d = traj[0].shape[1]
     cv_k_poly = np.zeros(deg*d,dtype = float)
@@ -167,7 +174,7 @@ def optimize_k(i,ind,deg,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma
     for n_iters in range(n_restarts):
         #create and symmetrize starting point
         init_point = sigma*np.random.randn(deg,d)
-        vspom = opt.minimize(Train_kth_order,init_point,args=(crit,f_vals,traj,traj_grad,W_train_spec,ind,n,deg), jac = Train_kth_order_grad, tol = tol)
+        vspom = opt.minimize(Train_kth_order,init_point,args=(crit,f_vals,traj,traj_grad,W_train_spec,ind,n,deg,beta), jac = Train_kth_order_grad, tol = tol)
         converged = converged or vspom.success
         if (vspom.fun < cur_f):
             cur_f = vspom.fun
@@ -180,28 +187,74 @@ def optimize_k(i,ind,deg,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma
     print("Jacobian matrix at termination: ")
     print(best_jac)
     return cv_k_poly
+
+def optimize_gaussians(centers,traj,traj_grad,optim_structure):
+    """
+    Function to run optimization based on shifted gaussians as control variates
+    """
+    W_train_spec = optim_structure["W"]
+    n_restarts = optim_structure["n_restarts"]
+    tol = optim_structure["tol"]
+    sigma = optim_structure["sigma"]
+    alpha = optim_structure["alpha"]
+    beta = optim_structure["beta"]
+    n = traj.shape[0]
+    cv_gauss = np.zeros_like(centers,dtype = float)
+    converged = False
+    cur_f = 1e100
+    best_jac = None
+    print("before optimization")
+    for n_iters in range(n_restarts):
+        #create and symmetrize starting point
+        init_point = sigma*np.random.randn(len(cv_gauss))
+        vspom = opt.minimize(Train_Gauss,init_point,args=(traj,traj_grad,W_train_spec,centers,n), jac = Train_Gauss_grad, tol = tol)
+        converged = converged or vspom.success
+        if (vspom.fun < cur_f):
+            cur_f = vspom.fun
+            cv_gauss = vspom.x
+            best_jac = vspom.jac
+    if converged:
+        print("Gaussian optimization terminated succesfully")
+    else:
+        print("Requested precision not necesserily achieved, try to increase error tolerance")
+    print("Jacobian matrix at termination: ")
+    print(best_jac)
+    return cv_gauss
+    
     
 
-def optimize_parallel_new(degree,inds_arr,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma = 1.0, alpha = 0.0):
-    """function to run parallel optimnization
+#def optimize_parallel_new(degree,inds_arr,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma, alpha, beta):
+def optimize_parallel_new(degree,inds_arr,f_vals,traj,traj_grad,optim_structure,methods):
+    """main function (wrapper) to run parallel optimization,
+    Args:
+        optim_structure - contains all information regarding optimization;
+        methods - list with some of the following values: ["ESVM","EVM","LS","MAX"]
+    Returns:
+        coefficients for the methods optimized
     """
+    #check arguments
+    if "ESVM" in methods:
+        if optim_structure["W"] is None:
+            print("forgot to construct W matrix, aborting")
+            return -1
+    #optimization
     nbcores = multiprocessing.cpu_count()
     trav = Pool(nbcores)
     if degree == 1:
-        res = trav.starmap(optimize_1, [(i,i%len(inds_arr),f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma) for i in range (3*len(inds_arr))])
+        print(len(methods)*len(inds_arr))
+        res = trav.starmap(optimize_1, [(i,i%len(inds_arr),f_vals,traj,traj_grad,optim_structure,methods) for i in range (len(methods)*len(inds_arr))])
     elif degree == 2:
-        res = trav.starmap(optimize_2, [(i,i%len(inds_arr),f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alpha) for i in range (3*len(inds_arr))])
+        res = trav.starmap(optimize_2, [(i,i%len(inds_arr),f_vals,traj,traj_grad,optim_structure,methods) for i in range (len(methods)*len(inds_arr))])
     else: #for degree >2 run optimization for polynomials of separate variables
-        res = trav.starmap(optimize_k, [(i,i%len(inds_arr),degree,f_vals,traj,traj_grad,W_train_spec,n_restarts,tol,sigma,alpha) for i in range (3*len(inds_arr))])
-    trav.close() 
-    ZAV = []
-    ZV = []
-    LS = []
+        res = trav.starmap(optimize_k, [(i,i%len(inds_arr),degree,f_vals,traj,traj_grad,optim_structure,methods) for i in range (len(methods)*len(inds_arr))])
+    trav.close()
+    coef_dict = {"ESVM":[],"EVM":[],"LS":[],"MAX":[]}
     for i in range(len(inds_arr)):
-        ZAV.append(res[i])
-        ZV.append(res[i+len(inds_arr)])
-        LS.append(res[i+2*len(inds_arr)])
-    return np.asarray(ZAV),np.asarray(ZV),np.asarray(LS)
+        for j in range(len(methods)):
+            coef_dict[methods[j]].append(res[i+j*len(inds_arr)])
+    for j in range(len(methods)):
+        coef_dict[methods[j]] = np.asarray(coef_dict[methods[j]])
+    return coef_dict
     
 
 def optimize_1_deg(inds_arr,X,X_grad,W,n_restarts = 1,tol = 1e-8,crit="ZAV"):
@@ -331,9 +384,9 @@ def eval_samples(typ,f_vals,X,X_grad,A,W_spec,n,d,vars_arr):
         #spectral estimate for variance
         if typ == "Vanilla":
             Y = f_vals[:,ind]
-        elif typ == "1st_order":
-            a = A[var_counter,:]
-            Y = f_vals[:,ind] + X_grad @ a
+        #elif typ == "1st_order":
+            #a = A[var_counter,:]
+            #Y = f_vals[:,ind] + X_grad @ a
         elif typ == "2nd_order":
             b = A[var_counter,:d]
             B = A[var_counter,d:].reshape((d,d))
@@ -347,12 +400,109 @@ def eval_samples(typ,f_vals,X,X_grad,A,W_spec,n,d,vars_arr):
         var_counter = var_counter + 1
     return integrals,vars_spec
 
+def eval_samples_gmm(typ,X,X_grad,theta,W_spec,n,centers):
+    """Universal function to evaluate MCMC samples with ot without control functionals
+    Args:
+        typ - one of "Vanilla", "ESVM"
+        ...
+    Returns:
+        ...
+    """
+    if typ not in ["Vanilla","ESVM"]:
+        raise "Not implemented error in EvalSamples"
+    #spectral estimate for variance
+    if typ == "Vanilla":
+        Y = cur_func(X[:,0])
+    elif typ == "ESVM":
+        X_matr = np.tile(X, (1, len(theta)))
+        Y = cur_func(X[:,0]) + X_grad[:,0]*np.sum(np.exp(-0.5*(X_matr - centers)**2)*(X_matr - centers)*theta, axis = 1) +\
+            np.sum(np.exp(-0.5*(X_matr - centers)**2)*((X_matr - centers)**2 - 1)*theta,axis = 1)
+    integral = np.mean(Y)
+    variance = Spectral_var(Y,W_spec)
+    return integral,variance
+
+def Eval_gaussian_mixt(intseed,sampler,Potential,test_dict,theta,centers):
+    """
+    Runs MCMC trajectory for Gaussian mixture, computes means and variances for vanilla and adjusted samples
+    """
+    sampler_type = sampler["sampler"]
+    burn_type = sampler["burn_type"]
+    main_type = sampler["main_type"]
+    W_spec = test_dict["W"]
+    step = test_dict["step"]
+    N_burn = test_dict["burn_in"]
+    N_test = test_dict["n_test"]
+    d = test_dict["dim"]
+    if sampler_type == "ULA":
+        traj,traj_grad = ULA(intseed,Potential,step, N_burn, N_test, d, burn_type, main_type)
+    elif sampler_type == "MALA":
+        traj,traj_grad,n_accepted = MALA(intseed,Potential,step,N_burn,N_test,d, burn_type, main_type)
+    elif sampler_type == "RWM":
+        traj,traj_grad,n_accepted = RWM(intseed,Potential,step,N_burn,N_test,d)
+    #lists to save the results of the trajectory
+    res_dict = {"Vanilla":[],"ESVM":[]}
+    vars_dict = {"Vanilla":[],"ESVM":[]}
+    #initialize function values
+    integrals,vars_spec = eval_samples_gmm("Vanilla",traj,traj_grad,1,W_spec,N_test,centers) #usual samples, without variance reduction
+    res_dict["Vanilla"].append(integrals)
+    vars_dict["Vanilla"].append(vars_spec)
+    #evaluate ESVM
+    integrals,vars_spec = eval_samples_gmm("ESVM",traj,traj_grad,theta,W_spec,N_test,centers) #ESVM-adjusted trajectory
+    #save the results
+    res_dict["ESVM"].append(integrals)
+    vars_dict["ESVM"].append(vars_spec)
+    return res_dict,vars_dict
+
+def Run_eval_test(intseed,degree,sampler,methods,vars_arr,Potential,test_dict,CV_dict,params_test,f_type):
+    """
+    New version of the main function;
+    Runs MCMC trajectory, computes means and variances for vanilla and adjusted samples
+    """
+    sampler_type = sampler["sampler"]
+    burn_type = sampler["burn_type"]
+    main_type = sampler["main_type"]
+    W_spec = test_dict["W"]
+    step = test_dict["step"]
+    N_burn = test_dict["burn_in"]
+    N_test = test_dict["n_test"]
+    d = test_dict["dim"]
+    if sampler_type == "ULA":
+        traj,traj_grad = ULA(intseed,Potential,step, N_burn, N_test, d, burn_type, main_type)
+    elif sampler_type == "MALA":
+        traj,traj_grad,n_accepted = MALA(intseed,Potential,step,N_burn,N_test,d, burn_type, main_type)
+    elif sampler_type == "RWM":
+        traj,traj_grad,n_accepted = RWM(intseed,Potential,step,N_burn,N_test,d)
+    else:
+        #independent samples, pure Monte-Carlo case
+        traj,traj_grad = MC_sampler(intseed,Potential,N_test,d) #note that there is no burn-in period needed here
+    #lists to save the results of the trajectory
+    res_dict = {"Vanilla":[],"ESVM":[],"EVM":[],"LS":[],"MAX":[]}
+    vars_dict = {"Vanilla":[],"ESVM":[],"EVM":[],"LS":[],"MAX":[]}
+    #initialize function values
+    f_vals = set_function(f_type,[traj],vars_arr,params_test)
+    #kill dimension which is not needed
+    f_vals = f_vals[0]
+    integrals,vars_spec = eval_samples("Vanilla",f_vals,traj,traj_grad,1,W_spec,N_test,d,vars_arr) #usual samples, without variance reduction
+    res_dict["Vanilla"].append(integrals)
+    vars_dict["Vanilla"].append(vars_spec)
+    #set flag based upon the polynomial degree
+    if degree == 2:
+        flag = "2nd_order"
+    else:
+        flag = "kth_order"
+    #main loop
+    for ind in range(len(methods)):
+        Coef_matr = CV_dict[methods[ind]]
+        integrals,vars_spec = eval_samples(flag,f_vals,traj,traj_grad,Coef_matr,W_spec,N_test,d,vars_arr)
+        res_dict[methods[ind]].append(integrals)
+        vars_dict[methods[ind]].append(vars_spec)
+    return res_dict,vars_dict
+
+"""
 def Run_eval_test(intseed,method,vars_arr,Potential,W_spec,CV_dict,step,N,n,d,params_test = None, f_type = "posterior_mean"):
-    """ 
     generic function that runs a MCMC trajectory
     and computes means and variances for the ordinary samples, 
     CV1, ZV1, CV2 and ZV2 
-    """
     sampler_type = method["sampler"]
     burn_type = method["burn_type"]
     main_type = method["main_type"]
@@ -392,9 +542,9 @@ def Run_eval_test(intseed,method,vars_arr,Potential,W_spec,CV_dict,step,N,n,d,pa
         integrals,vars_spec = eval_samples("2nd_order",f_vals,traj,traj_grad,A_ZV_2,W_spec,n,d,vars_arr) #CV - polynomials of degree 2, ZV estimator
         ints_all.append(integrals)
         vars_all.append(vars_spec)
-    if CV_dict["LS"] != None:
-        A_LS_1 = CV_dict["LS"][0]
-        A_LS_2 = CV_dict["LS"][1]
+    if CV_dict["MAX"] != None:
+        A_LS_1 = CV_dict["MAX"][0]
+        A_LS_2 = CV_dict["MAX"][1]
         integrals,vars_spec = eval_samples("kth_order",f_vals,traj,traj_grad,A_LS_1,W_spec,n,d,vars_arr) #CV - polynomials of degree 1, LS estimator
         ints_all.append(integrals)
         vars_all.append(vars_spec)
@@ -404,5 +554,5 @@ def Run_eval_test(intseed,method,vars_arr,Potential,W_spec,CV_dict,step,N,n,d,pa
     ints_all = np.asarray(ints_all) 
     vars_all = np.asarray(vars_all)
     return ints_all,vars_all
-        
+"""        
 

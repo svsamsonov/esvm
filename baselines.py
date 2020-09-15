@@ -1,9 +1,29 @@
 import numpy as np
 from numpy.fft import fft,ifft
 import scipy.sparse as sparse
+import scipy.stats as spstats
 import copy
 
-def standardize(X_train,X_test,intercept = True):
+def standartize_train(X_train,intercept = True):
+    """
+    """
+    X_train = copy.deepcopy(X_train)
+    if intercept:#adds intercept term
+        X_train = np.concatenate((np.ones(X_train.shape[0]).reshape(X_train.shape[0],1),X_train),axis=1)
+    d = X_train.shape[1]
+    # Centering the covariates 
+    means = np.mean(X_train,axis=0)
+    if intercept:#do not subtract the mean from the bias term
+        means[0] = 0.0
+    # Normalizing the covariates
+    X_train -= means
+    Cov_matr = np.dot(X_train.T,X_train)
+    U,S,V_T = np.linalg.svd(Cov_matr,compute_uv = True)
+    Sigma_minus_half = U @ np.diag(1./np.sqrt(S)) @ V_T
+    X_train = X_train @ Sigma_minus_half
+    return X_train
+
+def standartize(X_train,X_test,intercept = True):
     """Whitens noise structure, covariates updated
     """
     X_train = copy.deepcopy(X_train)
@@ -25,7 +45,7 @@ def standardize(X_train,X_test,intercept = True):
     X_train = X_train @ Sigma_minus_half
     # The same for test sample
     X_test = (X_test - means) @ Sigma_minus_half
-    return X_train,X_test   
+    return X_train,X_test 
 
 def GenerateSigma(d,rand_seed,eps = 1):
     """
@@ -41,13 +61,12 @@ def GenerateSigma(d,rand_seed,eps = 1):
     S,_ = np.linalg.eig(Sigma)
     return Sigma
 
-def set_bn(n):
+def cur_func(X):
     """
-    function that sets size of the window in BM,OBM,SV estimates;
-    please, make changes only here to change them simulteneously
+    calculate test function
     """
-    #return np.round(2*np.power(n,0.33)).astype(int)
-    return 20
+    return X**3
+    #return X + 0.5*X**3 + 3*np.sin(X)
 
 def set_function(f_type,traj,inds_arr,params):
     """Main function to be evaluated in case of logistic regression
@@ -63,12 +82,48 @@ def set_function(f_type,traj,inds_arr,params):
         f_vals = np.zeros((len(traj),len(traj[0]),len(inds_arr)),dtype = float)
         for traj_ind in range(len(traj)):
             for point_ind in range(len(inds_arr)):
-                f_vals[traj_ind,:,point_ind] = set_f(traj[traj_ind],inds_arr[point_ind])            
+                f_vals[traj_ind,:,point_ind] = copy.deepcopy(traj[traj_ind][:,inds_arr[point_ind]])          
     elif f_type == "2nd_moment": #params is ignored in this case
         f_vals = np.zeros((len(traj),len(traj[0]),len(inds_arr)),dtype = float)
         for traj_ind in range(len(traj)):
             for point_ind in range(len(inds_arr)):
-                f_vals[traj_ind,:,point_ind] = set_f_squared(traj[traj_ind],inds_arr[point_ind])
+                f_vals[traj_ind,:,point_ind] = copy.deepcopy(traj[traj_ind][:,inds_arr[point_ind]]**2)
+    
+    elif f_type == "3rd_moment": #params is ignored in this case
+        f_vals = np.zeros((len(traj),len(traj[0]),len(inds_arr)),dtype = float)
+        for traj_ind in range(len(traj)):
+            for point_ind in range(len(inds_arr)):
+                f_vals[traj_ind,:,point_ind] = copy.deepcopy(traj[traj_ind][:,inds_arr[point_ind]]**3)
+                
+    elif f_type == "exp_linear":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = np.exp(np.sum(traj[traj_ind],axis=1))
+            
+    elif f_type == "exp_sum":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = np.sum(np.exp(traj[traj_ind]),axis=1)
+            
+    elif f_type == "cos_sum":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = np.sum(np.cos(traj[traj_ind]),axis=1)
+            
+    elif f_type == "inv_l1":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = 1./(1. + np.sum(np.abs(traj[traj_ind]),axis=1))
+            
+    elif f_type == "exp_squared":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = np.exp(-np.sum(traj[traj_ind]**2,axis=1))
+            
+    elif f_type == "sin_squared":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = np.sin(np.sum(traj[traj_ind]**2,axis=1))     
                 
     elif f_type == "posterior_prob_point":
         f_vals = np.zeros((len(traj),len(traj[0]),len(inds_arr)),dtype = float)
@@ -86,6 +141,11 @@ def set_function(f_type,traj,inds_arr,params):
         f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
         for traj_ind in range(len(traj)):
             f_vals[traj_ind,:,0] = set_f_average_prob(traj[traj_ind],params)
+            
+    elif f_type == "posterior_prob_mean_probit":
+        f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
+        for traj_ind in range(len(traj)):
+            f_vals[traj_ind,:,0] = set_f_average_prob_probit(traj[traj_ind],params)
             
     elif f_type == "posterior_prob_variance":
         f_vals = np.zeros((len(traj),len(traj[0]),1),dtype = float)
@@ -136,7 +196,6 @@ def set_f_squared(X,ind):
     return copy.deepcopy(X[:,ind]**2)
 
 
-
 def set_f_point_prob(X,params,ind):
     obs = params["X"][ind,:]
     Y = params["Y"][ind]
@@ -156,6 +215,11 @@ def set_f_average_prob(X,params):
     obs = params["X"]
     Y = params["Y"]
     return np.mean(np.divide(1.,1.+np.exp(np.dot(X,(obs*(1-2*Y).reshape(len(Y),1)).T))),axis=1)
+
+def set_f_average_prob_probit(X,params):
+    obs = params["X"]
+    Y = params["Y"]
+    return np.mean(spstats.norm.cdf(np.dot(X,(obs*(2*Y-1).reshape(len(Y),1)).T)),axis=1)
 
 def set_f_average_var(X,params):
     obs = params["X"]
@@ -230,8 +294,13 @@ def Spectral_var(Y,W):
     """
     Compute spectral variance estimate for asymptotic variance with given kernel W for given vector Y
     """
+    #MCMC, dependencies exists, thus 
     n = len(Y)
-    return np.dot(PWP_fast(Y,W),Y)/n
+    if W is not None:
+        return np.dot(PWP_fast(Y,W),Y)/n
+    else:
+    #Monte Carlo, thus report simply the empirical variance
+        return np.mean((Y - np.mean(Y))**2)*n/(n-1)
                   
 def simple_funcs(X,ind):
     """
@@ -266,20 +335,28 @@ def construct_Eric_kernel_sparse(n):
     W = sparse.diags(diag_elems,np.arange(-2*bn,2*bn+1),shape = (n,n), format = "csr")
     return W
 
-def construct_ESVM_kernel(n):
+def construct_ESVM_kernel(n,bn):
     """
     Same as before, but now returns only first row of embedding circulant matrix;
     Arguments:
         n - int,size of the matrix;
+        bn - truncation point (lag-window size);
     Returns:
         c - np.array of size (2n-1);
     """
-    bn = set_bn(n)
+    c = np.zeros(2*n-1,dtype = np.float64)
+    if bn == 0:#1-dioagonal matrix
+        c[0] = 1.0
+        return c
+    elif bn == 1:#3-diagonal matrix
+        c[0] = 1.0
+        c[1] = 1.0
+        c[-1] = 1.0
+        return c
     trap_left = np.linspace(0,1,bn)
     trap_center = np.ones(2*bn+1,dtype = float)
     trap_right = np.linspace(1,0,bn)
     diag_elems = np.concatenate([trap_left,trap_center,trap_right])
-    c = np.zeros(2*n-1,dtype = np.float64)
     c[0:bn+1] = 1.0
     c[bn+1:2*bn+1] = trap_right
     c[-bn:] = 1.0

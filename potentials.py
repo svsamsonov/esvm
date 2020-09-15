@@ -3,11 +3,108 @@ import scipy.optimize as opt
 from multiprocessing import Pool
 import multiprocessing
 import copy
+from scipy.stats import rv_continuous
+import scipy.stats as spstats
+
+class poly_dens(rv_continuous):
+    def _pdf(self,x):
+        return np.sqrt(2)/(np.pi*(1+x**4))
+
+def compute_sqrt(Sigma):
+    S,V = np.linalg.eig(Sigma)
+    Sigma_half = V.dot(np.diag(np.sqrt(S)).dot(V.T))
+    return Sigma_half
     
 """
 here density is assumed to be e^{-U(x)},
 U(x) = 0.5*<\Sigma^{-1}(x-\mu),x-\mu> + |x - \mu|^{\alpha}
 """
+class IndependentPotential:
+    """
+    Used to get classical Monte-Carlo estimates for given density type
+    """
+    def __init__(self,typ,params):
+        self.params = params
+        self.typ = typ
+        self.d = params["d"]
+        
+    def sample(self,rand_seed,N):
+        """
+        Samples N observations with given random seed
+        """
+        np.random.seed(rand_seed)
+        if self.typ == "Normal":
+            mu = self.params["mu"]
+            Sigma = self.params["Sigma"]
+            if self.d > 1:
+                Sigma_half = compute_sqrt(Sigma)
+                traj = np.random.randn(N,self.d)
+                traj = traj.dot(Sigma_half)
+            else: #1-dimensional example
+                sigma_half = np.sqrt(Sigma)
+                traj = sigma_half*np.random.randn(N,1)
+            traj += mu.reshape((1,self.d))
+            traj_grad = self.gradpotential(traj)
+        elif self.typ == "Laplace":
+            mu = self.params["mu"]
+            l = self.params["lambda"]
+            traj = np.random.laplace(loc = mu, scale = l, size = (N,self.d))
+            traj_grad = self.gradpotential(traj)
+        elif self.typ == "Cauchy":
+            traj = np.random.standard_cauchy((N,self.d))
+            traj_grad = self.gradpotential(traj)
+        elif self.typ == "Pareto":
+            b = self.params["b"]
+            rv = spstats.pareto(b)
+            traj = rv.rvs(size = (N,self.d))
+            traj_grad = self.gradpotential(traj)
+        elif self.typ == "3rd_poly":
+            #here we will use implicitly the generation by inverse cdf
+            traj = np.random.rand(N,self.d)
+            traj = np.sqrt(np.abs(np.tan(np.pi*(traj-0.5))))*np.sign(traj-0.5)
+            traj_grad = self.gradpotential(traj)
+        elif self.typ == "Poly":
+            sample_class = poly_dens()
+            traj = sample_class.rvs(size = (N,self.d))
+            traj_grad =self.gradpotential(traj)
+        else:
+            raise "Not implemented error in IndependentPotential::sample"
+        return traj,traj_grad
+    
+    def gradpotential(self,X):
+        """
+        Evaluates gradients of log-density at points X
+        Args:
+            X - np.array of shape (N,d)
+        Outputs:
+            X_grad - np.array of shape (N,d)
+        """
+        if self.typ == "Normal":
+            mu = self.params["mu"]
+            Sigma = self.params["Sigma"]
+            if self.d > 1:
+                Sigma_inv = np.linalg.inv(Sigma)
+                return -(X - mu.reshape((1,self.d))).dot(Sigma_inv)
+            else: #1d case
+                return -(X - mu.reshape((1,self.d)))/Sigma
+        elif self.typ == "Laplace":
+            mu = self.params["mu"]
+            l = self.params["lambda"]
+            return -np.sign(X - mu)/l
+        elif self.typ == "3rd_poly":
+            return 1.0/X - (4*X**3)/(1+X**4) 
+        elif self.typ == "Pareto":
+            b = self.params["b"]
+            return -(b+1)/X
+        elif self.typ == "Cauchy":
+            return -2*X/(1+X**2)
+        elif self.typ == "Poly":
+            return -4*X**3/(1 + X**4)
+        else:
+            raise "Not implemented error in IndependentPotential::gradpotential"
+        
+    
+    
 class GaussPotential:
     """
     implements pseudo-gaussian potential function
@@ -49,7 +146,7 @@ class GaussPotential:
         """
         return -np.dot(X - self.mu.reshape(1,self.dim),self.S_inv)
         
-
+#################################################################################################################################
 class GaussMixture:
     """
     implements gaussian mixture potential function
@@ -69,24 +166,26 @@ class GaussMixture:
         self.mu_2_vec = mu_2.reshape(1,self.dim)
         self.S2 = np.linalg.inv(Sigma_2)
         self.det_s2 = np.sqrt(np.linalg.det(Sigma_2))
-        if np.linalg.norm(Sigma_1 - Sigma_2) < 1e-5:
-            self.homogen = True
-        else:
-            self.homogen = False
         self.eps = 1e-10
         
     def gradpotential(self,x):
         """
         returns gradient of log-density at point x
         """
-        mu_1 = self.mu_1.ravel()
-        mu_2 = self.mu_2.ravel()
-        numer = -self.p*self.S1 @ (x-mu_1)*np.exp(-np.dot(self.S1 @ (x - mu_1),x-mu_1)/2)/self.det_s1 -\
-                (1-self.p)*self.S2 @ (x-mu_2)*np.exp(-np.dot(self.S2 @ (x - mu_2),x-mu_2)/2)/self.det_s2
-        denom = self.eps + self.p*np.exp(-np.dot(self.S1 @ (x - mu_1),x-mu_1)/2)/self.det_s1 +\
-                (1-self.p)*np.exp(-np.dot(self.S2 @ (x - mu_2),x-mu_2)/2)/self.det_s2
+        #mu_1 = self.mu_1.ravel()
+        #mu_2 = self.mu_2.ravel()
+        numer = -self.p*self.S1 @ (x-self.mu_1)*np.exp(-np.dot(self.S1 @ (x - self.mu_1),x-self.mu_1)/2)/self.det_s1 -\
+                (1-self.p)*self.S2 @ (x-self.mu_2)*np.exp(-np.dot(self.S2 @ (x - self.mu_2),x-self.mu_2)/2)/self.det_s2
+        denom = self.eps + self.p*np.exp(-np.dot(self.S1 @ (x - self.mu_1),x-self.mu_1)/2)/self.det_s1 +\
+                (1-self.p)*np.exp(-np.dot(self.S2 @ (x - self.mu_2),x-self.mu_2)/2)/self.det_s2
         return numer/denom 
-               
+    
+    def potential(self,x):
+        """
+        returns log-density
+        """
+        return np.log(self.p*np.exp(-np.dot(self.S1 @ (x - self.mu_1),x-self.mu_1)/2)/self.det_s1 + (1-self.p)*np.exp(-np.dot(self.S2 @ (x - self.mu_2),x-self.mu_2)/2))
+    
     def vec_val(self,X):
         """
         returns vector of density values at each point X[i,:]
@@ -97,16 +196,6 @@ class GaussMixture:
         """
         clust_1 = self.p*np.exp(-qform_q(self.S1,X-self.mu_1,X-self.mu_1)/2)/self.det_s1
         clust_2 = (1-self.p)*np.exp(-qform_q(self.S2,X-self.mu_2,X-self.mu_2)/2)/self.det_s2
-        return clust_1 + clust_2
-    
-    def lin_vec_val(self,X):
-        """
-        same without quadratic part, which vanishes in case of same covariance structure
-        """
-        mu_1 = self.mu_1
-        mu_2 = self.mu_2
-        clust_1 = self.p*np.exp(-np.dot(mu_1,self.S1 @ mu_1)/2)*np.exp(X @ (self.S1 @ mu_1))
-        clust_2 = (1-self.p)*np.exp(-np.dot(mu_2,self.S2 @ mu_2)/2)*np.exp(X @ (self.S2 @ mu_2))
         return clust_1 + clust_2
         
     def vec_grad(self,X):
@@ -134,7 +223,7 @@ class GaussMixture:
                 (1-p)*(X-mu_2).dot(S2)*np.exp(-qform_q(S2,X-mu_2,X-mu_2)).reshape((n,1))/self.det_s2
             denom = self.vec_val(X) + self.eps    
         return numer / denom.reshape((n,1))
-    
+#################################################################################################################################
 class GausMixtureIdent:
     """
     Implements Gaussian Mixture potential function for identity covariance structure
@@ -158,7 +247,7 @@ class GausMixtureIdent:
         """
         return self.mu - x - 2*(1-self.p)*self.mu/(1-self.p + self.p*np.exp(2*np.dot(self.mu,x)))
 
-#######################################################################################################################################
+#################################################################################################################################
 class GausMixtureSame:
     """
     Implements Gaussian Mixture potential function for equal covariance structure in both clusters
@@ -183,6 +272,7 @@ class GausMixtureSame:
         returns gradient of log-density at point x
         """
         return self.Sigma_inv @ (self.mu - x) - 2*(1-self.p)*self.Sigma_inv @ self.mu/(1-self.p + self.p*np.exp(2*np.dot(self.mu,self.Sigma_inv @ x)))
+#################################################################################################################################
     
 class BananaShape:
     """
@@ -230,8 +320,7 @@ class potentialRegression:
     """
     varY = 1 # Variance of the linear likelihood
     varTheta = 100 # Variance of the prior Gaussian distribution
-    def __init__(self,Y,X,typ,optim_params,\
-                 batch_size = 50, print_info = False):
+    def __init__(self,Y,X,typ, print_info = False):
         """ initialisation 
         Args:
             Y: observations
@@ -243,109 +332,6 @@ class potentialRegression:
         self.type = typ  
         self.p, self.d = X.shape
         self.dim = self.d
-        if not optim_params["GD"]:#deterministic optimization
-            self.theta_star = self.compute_MAP_determ(print_info,optim_params)
-        else:#stochastic
-            self.theta_star = self.compute_MAP_gd(print_info,optim_params)
-        #Ignored if deterministic gradients are calculated
-        self.batch_size = batch_size
-        #Flag whether to use fixed point adaptation based on previously obtained theta^* or not
-        self.ratio = self.p/self.batch_size
-        
-    def compute_MAP_determ(self,print_info,optim_params):
-        """Compute MAP estimation either by stochastic gradient or by deterministic gradient descent
-        """
-        #by default
-        if optim_params["compute_fp"] == False:
-            return np.zeros(self.d, dtype = np.float64)
-        n_restarts = optim_params["n_restarts"]
-        tol = optim_params["gtol"]
-        sigma = optim_params["sigma"]
-        order = optim_params["order"]
-        converged = False
-        cur_f = 1e100
-        cur_x = np.zeros(self.d,dtype = np.float64)
-        best_jac = None
-        for n_iters in range(n_restarts):
-            if order == 2:#Newton-CG, 2nd order
-                vspom = opt.minimize(self.minus_potential,sigma*np.random.randn(self.d),method = "Newton-CG", jac = self.gradpotential_deterministic, hess = self.hess_potential_determ, tol=tol)
-            elif order == 1:#BFGS, quasi-Newtion, almost 1st order
-                vspom = opt.minimize(self.minus_potential,sigma*np.random.randn(self.d), jac = self.gradpotential_deterministic, tol=tol)
-            else:
-                raise "not implemented error: order of optimization method should be 1 or 2"
-            converged = converged or vspom.success
-            if print_info:#show some useless information
-                print("optimization iteration ended")
-                print("success = ",vspom.success)
-                print("func value = ",vspom.fun)
-                print("jacobian value = ",vspom.jac)
-                print("number of function evaluation = ",vspom.nfev)
-                print("number of jacobian evaluation = ",vspom.njev)
-                print("number of optimizer steps = ",vspom.nit)
-            if vspom.fun < cur_f:
-                cur_f = vspom.fun
-                cur_x = vspom.x
-                best_jac = vspom.jac
-        theta_star = cur_x
-        if converged:
-            print("theta^* found succesfully")
-        else:
-            print("requested precision not necesserily achieved during searching for theta^*, try to increase error tolerance")
-        print("final jacobian at termination: ")
-        print(best_jac)
-        return theta_star
-    
-    def grad_descent(self,rand_seed,print_info,optim_params,typ):
-        """repeats gradient descent until convergence for one starting point
-        """
-        stochastic = optim_params["stochastic"]
-        batch_size = optim_params["batch_size"]
-        sigma = optim_params["sigma"]
-        gtol = optim_params["gtol"]
-        gamma = optim_params["gamma"]
-        weight_decay = optim_params["weight_decay"]
-        N_iters = optim_params["loop_length"]
-        Max_loops = optim_params["n_loops"]
-        cur_jac_norm = 1e100
-        loops_counter = 0
-        np.random.seed(rand_seed)
-        x = sigma*np.random.randn(self.d)
-        while ((cur_jac_norm > gtol) and (loops_counter < Max_loops)):
-            #if true gradient still didn't converge => do SGD
-            print("jacobian norm = %f, step size = %f, loop number = %d" % (cur_jac_norm,gamma,loops_counter))
-            for i in range(N_iters):
-                if stochastic:#SGD
-                    batch_inds = np.random.choice(self.p,batch_size)
-                    grad = (self.p/batch_size)*self.gradloglikelihood_stochastic(x,batch_inds) + self.gradlogprior(x)
-                else:#deterministic GD
-                    grad = self.gradloglikelihood_determ(x) + self.gradlogprior(x)
-                x = x + gamma*grad
-            gamma = gamma*weight_decay
-            cur_jac_norm = np.linalg.norm(self.gradpotential_deterministic(x))
-            loops_counter += 1
-        res = {"value":self.minus_potential(x),"x":x,"jac_norm":cur_jac_norm}
-        return res
-    
-    def compute_MAP_gd(self,print_info,optim_params):
-        """Compute MAP estimation by stochastic gradient ascent
-        """
-        if optim_params["compute_fp"] == False:
-            return np.zeros(self.d, dtype = np.float64)
-        cur_f = 1e100
-        cur_x = np.zeros(self.d,dtype = np.float64)
-        best_jac = None
-        n_restarts = optim_params["n_restarts"]
-        nbcores = multiprocessing.cpu_count()
-        trav = Pool(nbcores)
-        res = trav.starmap(self.grad_descent, [(777+i,print_info,optim_params) for i in range (n_restarts)])
-        for ind in range(len(res)):
-            if res[ind]["value"] < cur_f:
-                cur_f = res[ind]["value"]
-                cur_x = res[ind]["x"]
-                best_jac = res[ind]["jac_norm"]
-        theta_star = cur_x
-        print("best jacobian norm = ",best_jac)
-        return theta_star
     
     def hess_potential_determ(self,theta):
         """Second-order optimization to accelerate optimization and (possibly) increase precision
@@ -364,10 +350,10 @@ class potentialRegression:
         Returns:
             real value of the likelihood evaluated at theta
         """
-        if self.type == "g": # Linear regression
+        if self.type == "linear": # Linear regression
             return -(1. / (2*self.varY))* np.linalg.norm(self.Y-np.dot(self.X,theta))**2 \
                         - (self.d/2.)*np.log(2*np.pi*self.varY)
-        elif self.type == "l": # Logistic
+        elif self.type == "logistic": # Logistic
             XTheta = np.dot(-self.X, theta)
             temp1 = np.dot(1.0-self.Y, XTheta)
             temp2 = -np.sum(np.log(1+np.exp(XTheta)))
@@ -384,11 +370,11 @@ class potentialRegression:
         Returns:
             R^d vector of the (full and fair) gradient of log-likelihood, evaluated at theta^*
         """
-        if self.type == "g": # Linear
+        if self.type == "linear": # Linear
             temp1 = np.dot(np.dot(np.transpose(self.X), self.X), theta)
             temp2 = np.dot(np.transpose(self.X), self.Y)
             return (1. / self.varY)*(temp2 - temp1)
-        elif self.type == "l": # Logistic
+        elif self.type == "logistic": # Logistic
             temp1 = np.exp(np.dot(-self.X, theta))
             temp2 = np.dot(np.transpose(self.X), self.Y)
             temp3 = np.dot(np.transpose(self.X), np.divide(1, 1+temp1))
@@ -402,25 +388,6 @@ class potentialRegression:
             temp2 = np.multiply((1 - self.Y), np.exp(-0.5*(np.square(XTheta)+np.log(2*np.pi)) \
                                                -logcdfMXTheta))
             return np.dot(np.transpose(self.X), temp1-temp2)
-        
-    def gradloglikelihood_stochastic(self,theta,batch_inds):
-        """returns stochastic gradient estimation over batch_inds observations
-        Args:
-            ...
-        Returns:
-            ...
-        """
-        data = self.X[batch_inds,:]
-        y_data = self.Y[batch_inds]
-        if self.type == "g":#Linear
-            raise "Not implemented error in gradloglikelihood stochastic"
-        elif self.type == "l":#Logistic
-            temp1 = np.exp(-np.dot(data, theta))
-            temp2 = np.dot(np.transpose(data), y_data)
-            temp3 = np.dot(np.transpose(data), np.divide(1, 1+temp1))
-            return temp2 - temp3
-        else:#Probit
-            raise "Not implemented error in gradloglikelihood stochastic"
             
         
     def logprior(self, theta):
@@ -463,52 +430,9 @@ class potentialRegression:
         """
         return self.gradloglikelihood_determ(theta) + self.gradlogprior(theta)
     
-    def stoch_grad(self,theta):
-        """compute gradient estimate as in SGLD
-        """
-        batch_inds = np.random.choice(self.p,self.batch_size)
-        return self.ratio*self.gradloglikelihood_stochastic(theta,batch_inds) + self.gradlogprior(theta)
-    
-    def stoch_grad_fixed_point(self,theta):
-        """compute gradient estimate as in SGLD with fixed-point regularization
-        """ 
-        batch_inds = np.random.choice(self.p,self.batch_size)
-        prior_part = self.gradlogprior(theta)-self.gradlogprior(self.theta_star)
-        like_part = self.ratio*(self.gradloglikelihood_stochastic(theta,batch_inds) - self.gradloglikelihood_stochastic(self.theta_star,batch_inds))
-        return prior_part + like_part
-    
-    def stoch_grad_SAGA(self,theta):
-        """compute gradient estimate in SGLD with SAGA variance reduction procedure
-        """
-        batch_inds = np.random.choice(self.p,self.batch_size)
-        #update gradient at batch points
-        vec_g_upd = self.update_gradients(batch_inds,theta)
-        #update difference
-        delta_g = np.sum(vec_g_upd,axis=0) - np.sum(self.grads_SAGA[batch_inds,:],axis=0)
-        grad = self.gradlogprior(theta) + self.ratio * delta_g + self.g_sum
-        self.g_sum += delta_g
-        self.grads_SAGA[batch_inds,:] = copy.deepcopy(vec_g_upd)
-        return grad
-    
     def gradpotential_deterministic(self,theta):
         """
         A bit strange implementation of always deterministic gradient, this one is needed for fixed point search
         """
         return -self.gradloglikelihood_determ(theta) - self.gradlogprior(theta)
-    
-    #Methids for SAGA
-    def init_grads_SAGA(self):
-        """Function to initialize SAGA gradients
-        """
-        self.grads_SAGA = np.zeros((self.p,self.d),dtype = float)
-        self.g_sum = np.zeros(self.d,dtype = float)
-        return 
-    
-    def update_gradients(self,inds_arr,theta):
-        """Updates gradients at batch_inds by values in point theta
-        """
-        X_cur = self.X[inds_arr,:]
-        Y_cur = self.Y[inds_arr]
-        temp = np.exp(-np.dot(X_cur, theta))
-        return X_cur*(Y_cur-np.divide(1., 1 + temp)).reshape((len(inds_arr),1))
          
